@@ -93,3 +93,49 @@ weird_rec %>%
 #     1  1.07     0     0
 #
 # the `d` category is missing from the baked dataset, so this seems shaky
+
+
+# Interaction effects -----------------------------------------------------
+
+price_breaks <- (1:6)*(10^5)
+
+ames_train %>% 
+    ggplot(aes(Year_Built, Sale_Price)) + 
+    geom_point(alpha = 0.4) + 
+    scale_y_log10() + 
+    geom_smooth(method = "loess") + 
+    theme_light()
+
+# now separate by another variable
+ames_train %>% 
+    count(Central_Air) %>% 
+    mutate(pct = n/sum(n))
+
+library(MASS)
+ames_train %>% 
+    ggplot(aes(Year_Built, Sale_Price)) + 
+    geom_point(alpha = 0.4) + 
+    scale_y_log10() + 
+    facet_wrap(~ Central_Air, nrow = 2) + 
+    geom_smooth(method = "rlm") + 
+    theme_light()
+
+mod1 <- lm(log10(Sale_Price) ~ Year_Built + 
+               Central_Air,                          data = ames_train)
+mod2 <- lm(log10(Sale_Price) ~ Year_Built + 
+               Central_Air + Year_Built:Central_Air, data = ames_train)
+anova(mod1, mod2)
+
+# can set up this interaction in the recipe
+interact_rec <- recipe(Sale_Price ~ Year_Built + Central_Air, 
+                       data = ames_train) %>% 
+    step_log(Sale_Price) %>% 
+    step_dummy(Central_Air) %>% 
+    step_interact(~ starts_with("Central_Air"):Year_Built)
+
+interact_rec
+
+interact_rec %>% 
+    prep(training = ames_train) %>% 
+    juice() %>% 
+    slice(153:157)
