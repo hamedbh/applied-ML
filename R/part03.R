@@ -51,7 +51,7 @@ bake(mod_rec_trained, new_data = ames_test)
 # now build alternative recipe filtering out zero-variance predictors
 
 mod_filter_rec <- recipe(Sale_Price ~ Longitude + Latitude + Neighborhood, 
-                        data = ames_train) %>% 
+                         data = ames_train) %>% 
     step_log(Sale_Price, base = 10) %>% 
     
     step_dummy(all_nominal()) %>% 
@@ -139,3 +139,125 @@ interact_rec %>%
     prep(training = ames_train) %>% 
     juice() %>% 
     slice(153:157)
+
+
+# Principal Component Analysis --------------------------------------------
+
+
+bivariate_train %>% 
+    ggplot(aes(A, B, colour = Class)) + 
+    geom_point(alpha = 0.3) + 
+    scale_colour_manual(values = c(One = "darkslateblue", 
+                                   Two = "orangered")) + 
+    theme_light() + 
+    labs(
+        x = "PredictorA", 
+        y = "PredictorB"
+    ) + 
+    theme(legend.position = "top") 
+# highly correlated, right-skew
+
+# An inverse transformation resolves the skewness. 
+bivariate_train %>% 
+    mutate_at(
+        vars(A, B), 
+        ~ 1/.x
+    ) %>% 
+    ggplot(aes(A, B, colour = Class)) + 
+    geom_point(alpha = 0.3) + 
+    scale_colour_manual(values = c(One = "darkslateblue", 
+                                   Two = "orangered")) + 
+    theme_light() + 
+    labs(
+        x = "1/A", 
+        y = "1/B"
+    ) + 
+    theme(legend.position = "top") 
+
+# Can do this with a recipe
+bivariate_rec <- recipe(
+    Class ~ ., 
+    data = bivariate_train
+) %>% 
+    step_BoxCox(all_predictors()) %>% 
+    prep(training = bivariate_train)
+
+inverse_train_data <- bivariate_rec %>% 
+    juice()
+inverse_test_data <- bivariate_rec %>% 
+    bake(new_data = bivariate_test)
+
+inverse_train_data %>% 
+    ggplot(aes(A, B, colour = Class)) + 
+    geom_point(alpha = 0.3) + 
+    scale_colour_manual(values = c(One = "darkslateblue", 
+                                   Two = "orangered")) + 
+    theme_light() + 
+    labs(
+        x = "1/A", 
+        y = "1/B"
+    ) + 
+    theme(legend.position = "top") 
+
+# Now build on this by using PCA via recipe()
+bivariate_pca_rec <- recipe(
+    Class ~ A + B, 
+    data = bivariate_train
+) %>% 
+    step_BoxCox(all_predictors()) %>% 
+    step_normalize(all_predictors()) %>% 
+    step_pca(all_predictors()) %>% 
+    prep(training = bivariate_train)
+
+pca_test <- bake(bivariate_pca_rec, 
+                 new_data = bivariate_test)
+
+# extend the range for plotting
+pca_rng <- extendrange(c(pca_test$PC1, pca_test$PC2))
+
+pca_test %>% 
+    ggplot(aes(PC1, PC2, colour = Class)) + 
+    geom_point(alpha = 0.2, cex = 1.5) + 
+    scale_colour_manual(values = c(One = "darkslateblue", 
+                                   Two = "orangered")) + 
+    xlim(pca_rng) + 
+    ylim(pca_rng) + 
+    theme_light() + 
+    theme(legend.position = "top")
+
+# This shows an important aspect of PCA: the most important component with 
+# respect to variation in the dataset may not be connected with the outcome. In 
+# this case it is PC2 that is most predictive of Class. Can test this with 
+# models
+
+pc1_mod <- logistic_reg() %>% 
+    set_engine("glm") %>% 
+    fit(Class ~ PC1, 
+        data = juice(bivariate_pca_rec))
+
+pc2_mod <- logistic_reg() %>% 
+    set_engine("glm") %>% 
+    fit(Class ~ PC2, 
+        data = juice(bivariate_pca_rec))
+
+tibble(
+    PC = paste0("PC", 1:2), 
+    mod = list(pc1_mod, pc2_mod)
+) %>% 
+    mutate(
+        preds = map(mod, 
+                    ~ predict(.x, 
+                              pca_test, 
+                              type = "prob") %>% 
+                        bind_cols(
+                            pca_test %>% dplyr::select(Class)
+                        )
+        )
+    ) %>% 
+    transmute(PC, 
+              auc = map_dbl(preds, 
+                         ~ roc_auc(.x, 
+                                   truth = Class, 
+                                   .pred_One) %>% 
+                             pull(.estimate)))
+
