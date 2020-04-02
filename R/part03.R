@@ -256,8 +256,69 @@ tibble(
     ) %>% 
     transmute(PC, 
               auc = map_dbl(preds, 
-                         ~ roc_auc(.x, 
-                                   truth = Class, 
-                                   .pred_One) %>% 
-                             pull(.estimate)))
+                            ~ roc_auc(.x, 
+                                      truth = Class, 
+                                      .pred_One) %>% 
+                                pull(.estimate)))
 
+
+# Recipes and Models ------------------------------------------------------
+
+(ames_rec <- recipe(
+    Sale_Price ~ Bldg_Type + Neighborhood + Year_Built + 
+        Gr_Liv_Area + Full_Bath + Year_Sold + Lot_Area +
+        Central_Air + Longitude + Latitude,
+    data = ames_train
+) %>% 
+    # log transform the outcome variable to deal with skew
+    step_log(all_outcomes(), base = 10) %>% 
+    # handle extreme skew in two of the predictors
+    step_BoxCox(Lot_Area, Gr_Liv_Area) %>% 
+    # clump smaller Neighborhood groups into other
+    step_other(Neighborhood, threshold = 0.05) %>% 
+    step_dummy(all_nominal()) %>% 
+    step_interact(~ starts_with("Central_"):Year_Built) %>% 
+    # create a B-spline expansion for geo variables to account for non-linearity
+    step_ns(Longitude, Latitude, deg_free = 5) %>% 
+    prep()
+)
+
+lm_fit <- lm_mod %>% 
+    fit(Sale_Price ~ ., 
+        data = juice(ames_rec))
+
+glance(lm_fit$fit)
+
+ames_test_processed <- bake(ames_rec, 
+                            ames_test, 
+                            all_predictors())
+
+# Keeping track of separate objects and using juice() or bake() adds steps. 
+# Use {workflows} objects to bundle the model and the pre-proc recipe together. 
+
+(ames_wfl <- workflow() %>% 
+        add_model(lm_mod) %>% 
+        add_recipe(ames_rec))
+
+(ames_wfl_fit <- fit(ames_wfl, ames_train))
+
+predict(ames_wfl_fit, ames_test) %>% slice(1:5)
+
+# Knowledge check
+# Match function to package
+
+# Fit a K-NN model - parsnip
+
+# Extract holidays from dates - recipes
+
+# Make a training/test split - rsample
+
+# Bundle a recipe and model - workflows
+
+# Is high in vitamin A - carrot
+
+# Compute R2 - yardstick
+
+# Bin a predictor (but seriously,...don't) - recipes
+
+# none? - ggvis
