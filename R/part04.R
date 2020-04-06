@@ -162,6 +162,9 @@ finalize(rf_set,
 
 ?nearest_neighbor
 
+# Exercise: create at least one parameter grid for a K-nearest neighbours model 
+# and plot.
+
 # Params are neighbors, weight_func, and dist_power
 knn_set <- parameters(neighbors(), 
            dist_power())
