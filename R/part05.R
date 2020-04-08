@@ -1,0 +1,176 @@
+
+# Regression Models -------------------------------------------------------
+
+library(tidymodels)
+
+# Using a new dataset, predicting number of people at L-train station in 
+# Chicago
+data("Chicago")
+
+range(Chicago$date)
+Chicago %>% 
+    ggplot(aes(x = date, y = Clark_Lake)) + 
+    stat_smooth(method = "gam") + 
+    facet_wrap(~ Cubs_Home)
+
+library(stringr)
+
+us_hols <- timeDate::listHolidays() %>% 
+    str_subset("(^US)|(Easter)")
+
+chi_rec <- recipe(ridership ~ ., 
+                  data = Chicago) %>% 
+    step_holiday(date, holidays = us_hols) %>% 
+    step_date(date) %>% 
+    step_rm(date) %>% 
+    step_dummy(all_nominal()) %>% 
+    step_zv(all_predictors())
+
+# For this sort of time series can use rolling periods for out of time testing
+chi_folds <- rolling_origin(
+    Chicago, 
+    initial = 364 * 15, 
+    assess = 7 * 4, 
+    skip = 7 * 4, 
+    cumulative = FALSE
+)
+
+chi_folds %>% nrow()
+
+
+# Linear models -----------------------------------------------------------
+
+# Use regularisation to mitigate the collinearity and reduce number of features
+
+glmn_grid <- expand.grid(
+    penalty = 10^(seq(-3, -1, length.out = 20)), 
+    mixture = (0:5)/5
+)
+
+glmn_rec <- chi_rec %>% 
+    step_normalize(all_predictors())
+
+glmn_mod <- linear_reg(penalty = tune(), 
+                       mixture = tune()) %>% 
+    set_engine("glmnet")
+
+ctrl <- control_grid(save_pred = TRUE)
+
+# Can use parallel processing to get a big speed-up
+
+library(doParallel)
+cl <- makeCluster(2)
+registerDoParallel(cl)
+
+glmn_tune <- tune_grid(
+    glmn_mod, 
+    glmn_rec, 
+    resamples = chi_folds, 
+    grid = glmn_grid, 
+    control = ctrl
+)
+
+stopCluster(cl)
+
+rmse_vals <- collect_metrics(glmn_tune) %>% 
+    filter(.metric == "rmse")
+
+rmse_vals %>% 
+    mutate(mixture = format(mixture)) %>% 
+    ggplot(aes(penalty, mean, colour = mixture)) + 
+    geom_line() + 
+    geom_point() + 
+    scale_x_log10()
+
+# Compare with autoplot method
+autoplot(glmn_tune)
+
+show_best(glmn_tune, metric = "rmse")
+
+(best_glmn <- select_best(glmn_tune, metric = "rmse"))
+
+(glmn_pred <- collect_predictions(glmn_tune) %>% 
+        # keep just the best model
+        inner_join(
+            best_glmn, 
+            by = c("penalty", "mixture")
+        )
+)
+
+# Can see the individual predictions, which were poor
+ggplot(glmn_pred, aes(x = .pred, y = ridership)) + 
+    geom_abline(col = "green") + 
+    geom_point(alpha = .3) + 
+    coord_equal() + 
+    theme_light()
+
+large_resid <- glmn_pred %>% 
+    mutate(resid = ridership - .pred) %>% 
+    arrange(desc(abs(resid))) %>% 
+    slice(1:4)
+
+library(lubridate)
+
+Chicago %>% 
+    slice(large_resid$.row) %>% 
+    select(date) %>% 
+    mutate(day = wday(date, label = TRUE)) %>% 
+    bind_cols(large_resid)
+
+# The large underprediction on 2016-03-12 was because of a Trump rally. Model 
+# also overpredicted on two holidays. 4 July has an indicator in the list of 
+# holidays, but Boxing Day (26 Dec) doesn't. 
+
+# Now can prep a model with the best parameters
+
+glmn_rec_final <- prep(glmn_rec)
+
+glmn_mod_final <- finalize_model(glmn_mod, 
+                                 best_glmn)
+
+glmn_fit <- glmn_mod_final %>% 
+    fit(ridership ~ ., 
+        data = juice(glmn_rec_final))
+glmn_fit
+
+library(glmnet)
+
+plot(glmn_fit$fit, xvar = "lambda")
+
+# They advise against using predict(glmn_fit$fit), instead use the predict() 
+# method on the object produced by fit().
+
+# Can tidy up the coefficients and plot manually in ggplot
+tidy_coefs <- glmn_fit %>% 
+    broom::tidy() %>% 
+    dplyr::filter(term != "(Intercept)") %>% 
+    dplyr::select(-step, -dev.ratio)
+
+# Get the closest value to the optimum lambda
+delta <- abs(tidy_coefs$lambda - best_glmn$penalty)
+lambda_opt <- tidy_coefs$lambda[which.min(delta)]
+
+# keep the term labels for those with large coefficients and the right lambda
+label_coefs <- tidy_coefs %>% 
+    mutate(abs_estimate = abs(estimate)) %>% 
+    dplyr::filter(abs_estimate >= 1.1) %>% 
+    dplyr::distinct(term) %>% 
+    inner_join(tidy_coefs, 
+               by = "term") %>% 
+    dplyr::filter(lambda == lambda_opt)
+
+tidy_coefs %>% 
+    ggplot(aes(lambda, estimate, group = term, colour = term, label = term)) + 
+    geom_vline(xintercept = lambda_opt, 
+               lty = 3) + 
+    geom_line(alpha = 0.4) + 
+    theme_light() + 
+    theme(legend.position = "none") + 
+    scale_x_log10() + 
+    ggrepel::geom_text_repel(data = label_coefs, aes(x = 0.005))
+
+library(vip)
+
+vip(glmn_fit, 
+    num_features = 20L, 
+    lambda = best_glmn$penalty)
