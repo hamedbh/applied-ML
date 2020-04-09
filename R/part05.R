@@ -174,3 +174,105 @@ library(vip)
 vip(glmn_fit, 
     num_features = 20L, 
     lambda = best_glmn$penalty)
+
+
+# Multivariate Adaptive Regression Splines --------------------------------
+
+# Could let MARS decide on the number of terms, but tune for the dimensions
+mars_mod <- mars(prod_degree = tune())
+
+# But instead will tune both
+mars_mod <- mars(num_terms = tune("mars terms"), 
+                 prod_degree = tune(), 
+                 prune_method = "none") %>% 
+    set_engine("earth") %>% 
+    set_mode("regression")
+
+# Because MARS is based on linear regression need to deal with the 
+# highly-correlated predictors. Use PCA this time.
+
+mars_rec <- chi_rec %>% 
+    step_normalize(one_of(!!stations)) %>% 
+    step_pca(one_of(!!stations), num_comp = tune("pca comps"))
+
+
+# Segue - Interative search methods ---------------------------------------
+
+# Description of Bayesian optimisation in the slides is good, although the 
+# LaTeX doesn't seem to have rendered correctly. 
+
+# Optional step of adding model and recipe to a workflow
+
+chi_wflow <- workflow() %>% 
+    add_recipe(mars_rec) %>% 
+    add_model(mars_mod)
+
+chi_set <- chi_wflow %>% 
+    parameters() %>% 
+    update(
+        `pca comps` = num_comp(c(0L, 20L)), # 0L would mean not using PCA
+        `mars terms` = num_terms(c(2L, 100L))
+    )
+
+# Use parallel processing
+
+library(doMC)
+registerDoMC(cores = parallel::detectCores(logical = FALSE))
+
+ctrl <- control_bayes(verbose = TRUE, 
+                      save_pred = TRUE)
+# Some defaults:
+#   - Uses expected improvement with no trade-off. See ?exp_improve().
+#   - RMSE is minimized
+set.seed(7891)
+
+# wrap the tuning function call in a conditional to read from disk if possible, 
+# as the optimisation process takes ages!
+tune_path <- here::here("data", "mars_tune.rds")
+
+if (file.exists(tune_path)) {
+    mars_tune <- readr::read_rds(tune_path)
+} else {
+    mars_tune <- tune_bayes(
+        chi_wflow,
+        resamples = chi_folds,
+        iter = 25,
+        param_info = chi_set,
+        metrics = metric_set(rmse),
+        initial = 4,
+        control = ctrl
+    )
+    readr::write_rds(mars_tune, tune_path)
+}
+
+autoplot(mars_tune, type = "performance") + 
+    theme_light()
+autoplot(mars_tune, type = "marginals") + 
+    theme_light()
+autoplot(mars_tune, type = "parameters") + 
+    theme_light()
+
+show_best(mars_tune, "rmse")
+
+best_mars <- select_best(mars_tune, "rmse")
+
+mars_pred <- mars_tune %>% 
+    collect_predictions() %>% 
+    inner_join(
+        best_mars, 
+        by = c("mars terms", "prod_degree", "pca comps")
+    )
+ggplot(mars_pred, aes(x = .pred, y = ridership)) + 
+    geom_abline(col = "green") + 
+    geom_point(alpha = .3) + 
+    coord_equal()
+
+
+final_mars_wfl <- finalize_workflow(chi_wflow, 
+                                    best_mars) %>% 
+    fit(data = Chicago)
+
+final_mars_wfl %>% 
+    pull_workflow_fit() %>% 
+    vip(num_features = 20L, type = "gcv") + 
+    theme_light()
