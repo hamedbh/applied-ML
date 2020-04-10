@@ -152,3 +152,65 @@ approx_roc_curves <- function(...) {
 }
 
 approx_roc_curves(CART = cart_tune)
+
+
+# Downsampling exercise ---------------------------------------------------
+
+downsamp_rec <- recipe(score ~ product + review,
+                   data = training_data) %>% 
+    update_role(product, new_role = "id") %>% 
+    step_downsample(score) %>% 
+    step_mutate(review_raw = review) %>% # creates a temporary copy
+    step_textfeature(review_raw) %>% 
+    step_tokenize(review) %>% 
+    step_stopwords(review) %>% 
+    step_stem(review) %>% 
+    step_texthash(review, 
+                  signed = FALSE, 
+                  # now number of hash terms is a tuning parameter
+                  num_terms = tune()) %>% 
+    step_zv(all_predictors())
+
+downsamp_wfl <- workflow() %>% 
+    add_model(cart_mod) %>% 
+    add_recipe(downsamp_rec)
+
+set.seed(2553)
+
+# wrap the tuning function call in a conditional to read from disk if possible
+downsamp_path <- here::here("data", "downsamp_tune.rds")
+
+if (file.exists(downsamp_path)) {
+    downsamp_tune <- readr::read_rds(downsamp_path)
+} else {
+    downsamp_tune <- tune_grid(
+        downsamp_wfl, 
+        text_folds, 
+        grid = 10, 
+        metrics = metric_set(roc_auc), 
+        control = ctrl
+    )
+    readr::write_rds(downsamp_tune, downsamp_path)
+}
+show_best(downsamp_tune, "roc_auc")
+autoplot(downsamp_tune) + theme_light()
+
+downsamp_pred <- collect_predictions(downsamp_tune)
+
+downsamp_pred %>% 
+    inner_join(
+        select_best(downsamp_tune, "roc_auc"), 
+        by = c("num_terms", "cost_complexity", "min_n")
+    ) %>% 
+    group_by(id) %>% 
+    roc_curve(score, .pred_great) %>% 
+    autoplot()
+
+approx_roc_curves(CART = downsamp_tune)
+
+# In this case the best performance for the downsampled model is slightly worse 
+# than the one using the full dataset.
+
+# Boosting ----------------------------------------------------------------
+
+
