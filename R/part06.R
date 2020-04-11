@@ -157,7 +157,7 @@ approx_roc_curves(CART = cart_tune)
 # Downsampling exercise ---------------------------------------------------
 
 downsamp_rec <- recipe(score ~ product + review,
-                   data = training_data) %>% 
+                       data = training_data) %>% 
     update_role(product, new_role = "id") %>% 
     step_downsample(score) %>% 
     step_mutate(review_raw = review) %>% # creates a temporary copy
@@ -214,3 +214,57 @@ approx_roc_curves(CART = downsamp_tune)
 # Boosting ----------------------------------------------------------------
 
 
+C5_mod <- boost_tree(trees = tune(), 
+                     min_n = tune()) %>% 
+    set_engine("C5.0") %>% 
+    set_mode("classification")
+
+C5_wfl <- update_model(cart_wfl, C5_mod)
+
+# We will just modify our CART grid and add 
+# a new parameter: 
+set.seed(5793)
+
+C5_grid <- collect_metrics(cart_tune) %>% 
+    dplyr::select(min_n, num_terms) %>% 
+    mutate(trees = sample(1:100, 10))
+
+C5_path <- here::here("data", "C5_tune")
+
+if (file.exists(C5_path)) {
+    C5_tune <- readr::read_rds(C5_path)
+} else {
+    C5_tune <- tune_grid(
+        C5_wfl,
+        text_folds,
+        grid = C5_grid,
+        metrics = metric_set(roc_auc),
+        control = ctrl
+    )
+    readr::write_rds(C5_tune, C5_path)
+}
+
+approx_roc_curves(C5 = C5_tune, CART = cart_tune)
+
+show_best(C5_tune, "roc_auc")
+
+(best_C5 <- select_best(C5_tune, "roc_auc"))
+
+C5_wfl_final <- C5_wfl %>% 
+    finalize_workflow(best_C5) %>% 
+    fit(data = training_data)
+
+C5_wfl_final
+
+test_probs <- C5_wfl_final %>% 
+    predict(testing_data, type = "prob") %>% 
+    bind_cols(testing_data %>% dplyr::select(score)) %>% 
+    bind_cols(predict(C5_wfl_final, testing_data))
+
+roc_auc(test_probs, score, .pred_great)
+
+conf_mat(test_probs, score, .pred_class)
+
+roc_values <- roc_curve(test_probs, score, .pred_great)
+
+autoplot(roc_values)
