@@ -242,7 +242,7 @@ if (file.exists(tune_path)) {
         initial = 4,
         control = ctrl
     )
-    readr::write_rds(mars_tune, tune_path)
+    readr::write_rds(mars_tune, tune_path, compress = "xz", compression = 9L)
 }
 
 autoplot(mars_tune, type = "performance") + 
