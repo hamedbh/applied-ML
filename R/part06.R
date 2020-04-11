@@ -41,7 +41,8 @@ library(textfeatures)
 
 # quick helper function
 count_to_binary <- function(x) {
-    ifelse(x != 0, "present", "absent")
+    factor(ifelse(x != 0, "present", "absent"),
+           levels = c("present", "absent"))
 }
 
 text_rec <- recipe(score ~ product + review,
@@ -106,7 +107,7 @@ if (file.exists(tune_path)) {
         metrics = metric_set(roc_auc), 
         control = ctrl
     )
-    readr::write_rds(cart_tune, tune_path)
+    readr::write_rds(cart_tune, tune_path, compress = "xz", compression = 9L)
 }
 show_best(cart_tune, "roc_auc")
 autoplot(cart_tune) + theme_light()
@@ -190,7 +191,10 @@ if (file.exists(downsamp_path)) {
         metrics = metric_set(roc_auc), 
         control = ctrl
     )
-    readr::write_rds(downsamp_tune, downsamp_path)
+    readr::write_rds(downsamp_tune,
+                     downsamp_path,
+                     compress = "xz",
+                     compression = 9L)
 }
 show_best(downsamp_tune, "roc_auc")
 autoplot(downsamp_tune) + theme_light()
@@ -229,7 +233,7 @@ C5_grid <- collect_metrics(cart_tune) %>%
     dplyr::select(min_n, num_terms) %>% 
     mutate(trees = sample(1:100, 10))
 
-C5_path <- here::here("data", "C5_tune")
+C5_path <- here::here("data", "C5_tune.rds")
 
 if (file.exists(C5_path)) {
     C5_tune <- readr::read_rds(C5_path)
@@ -241,7 +245,7 @@ if (file.exists(C5_path)) {
         metrics = metric_set(roc_auc),
         control = ctrl
     )
-    readr::write_rds(C5_tune, C5_path)
+    readr::write_rds(C5_tune, C5_path, compress = "xz", compression = 9L)
 }
 
 approx_roc_curves(C5 = C5_tune, CART = cart_tune)
@@ -268,3 +272,49 @@ conf_mat(test_probs, score, .pred_class)
 roc_values <- roc_curve(test_probs, score, .pred_great)
 
 autoplot(roc_values)
+
+
+# Naïve Bayes -------------------------------------------------------------
+
+nb_rec <- tree_rec %>%
+    step_mutate_at(starts_with("review_hash"), fn = count_to_binary)
+
+library(discrim)
+nb_mod <- naive_Bayes() %>% set_engine("klaR")
+
+nb_path <- here::here("data", "nb_tune.rds")
+
+if (file.exists(nb_path)) {
+    nb_tune <- readr::read_rds(nb_path)
+} else {
+    nb_tune <- tune_grid(
+        nb_mod,
+        nb_rec,
+        resamples = text_folds,
+        grid = tibble(num_terms = floor(2^seq(8, 12, by = 0.5))),
+        metrics = metric_set(roc_auc),
+        control = ctrl
+    )
+    readr::write_rds(nb_tune, nb_path, compress = "xz", compression = 9L)
+}
+
+autoplot(nb_tune) + 
+    scale_x_continuous(trans = log2_trans()) + 
+    theme_light()
+
+approx_roc_curves(CART = cart_tune, 
+                  C5 = C5_tune, 
+                  "Naive Bayes" = nb_tune)
+
+
+# Some Cool Stuff ---------------------------------------------------------
+
+# Can deploy models on SQL
+library(tidypredict)
+library(dbplyr)
+
+lin_reg_fit <- lm(Sepal.Width ~ ., data = iris)
+
+tidypredict_fit(lin_reg_fit)
+
+tidypredict_sql(lin_reg_fit, con = simulate_dbi())
